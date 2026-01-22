@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 10,
+      "includeFiles": "auth_info_baileys/**"
+    }
+  }
+}
