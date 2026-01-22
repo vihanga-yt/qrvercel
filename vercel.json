@@ -1,8 +1,7 @@
 {
   "functions": {
-    "api/**/*.js": {
-      "maxDuration": 10,
-      "includeFiles": "auth_info_baileys/**"
+    "api/scan.js": {
+      "maxDuration": 10
     }
   }
 }
