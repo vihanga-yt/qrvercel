@@ -2,15 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 
-// Vercel Serverless Function
 module.exports = async (req, res) => {
-    console.log("Function Started: Initializing QR Scanner...");
+    console.log("Function Started...");
 
     try {
-        // --------------------------------------------------------------------------------
-        // 1. DYNAMIC IMPORT (CRITICAL FIX)
-        // This allows us to use the latest ESM Baileys in a CommonJS Vercel environment
-        // --------------------------------------------------------------------------------
+        // --- DYNAMIC IMPORT FOR BAILEYS (Fixes ESM Error) ---
         const { 
             default: makeWASocket, 
             useMultiFileAuthState, 
@@ -21,18 +17,18 @@ module.exports = async (req, res) => {
         } = await import('@whiskeysockets/baileys');
         
         const pino = (await import('pino')).default;
-        // --------------------------------------------------------------------------------
+        // ----------------------------------------------------
 
-        // 2. Setup Session Directory (Must use /tmp on Vercel)
+        // 1. Setup Session Directory in /tmp
         const sessionDir = path.join('/tmp', 'baileys_auth_temp');
         
-        // Clean up previous sessions to force a NEW QR code every time
+        // Clean start: Remove old session
         if (fs.existsSync(sessionDir)) {
             fs.rmSync(sessionDir, { recursive: true, force: true });
         }
         fs.mkdirSync(sessionDir, { recursive: true });
 
-        // 3. Initialize Auth & Socket
+        // 2. Initialize Auth
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
         const { version } = await fetchLatestBaileysVersion();
 
@@ -44,109 +40,134 @@ module.exports = async (req, res) => {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
             },
-            // Use Chrome to look like a real browser
             browser: Browsers.macOS('Desktop'), 
-            connectTimeoutMs: 10000,
+            connectTimeoutMs: 60000, // Long timeout
         });
 
-        // 4. Handle the Connection
+        // 3. Handle Request
         await new Promise((resolve, reject) => {
             
-            // TIMEOUT SAFETY: 
-            // Vercel Free Tier kills processes after ~10 seconds. 
-            // We set a hard stop to prevent "Invocation Failed" errors.
-            const timeout = setTimeout(() => {
+            // Server-side Timeout (Kill process after 50s to be safe)
+            const serverTimeout = setTimeout(() => {
                 try { sock.end(undefined); } catch(e) {}
-                if (!res.headersSent) {
-                    res.status(504).send('<h1>Timeout</h1><p>The scan took too long. Please refresh the page to try again.</p>');
-                }
                 resolve();
-            }, 9500); // 9.5 seconds
+            }, 50000);
 
             sock.ev.on('creds.update', saveCreds);
 
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
 
-                // --- SCENARIO A: QR Code Generated ---
+                // --- GENERATE QR ---
                 if (qr) {
-                    console.log("QR Generated");
                     const url = await QRCode.toDataURL(qr);
                     
                     if (!res.headersSent) {
                         res.setHeader('Content-Type', 'text/html');
-                        // We write the HTML immediately but keep the connection open
+                        // HTML with LIVE COUNTDOWN
                         res.write(`
                             <html>
                             <head>
-                                <meta http-equiv="refresh" content="10">
+                                <title>WhatsApp Scan</title>
                                 <style>
-                                    body { font-family: sans-serif; text-align: center; padding: 20px; }
-                                    img { border: 5px solid #25D366; border-radius: 10px; margin: 20px 0; }
-                                    .instruction { background: #f0f0f0; padding: 10px; border-radius: 5px; display: inline-block;}
+                                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f0f2f5; padding-top: 50px; }
+                                    .card { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; }
+                                    h2 { color: #41525d; margin-top: 0; }
+                                    img { border: 8px solid white; outline: 2px solid #e9edef; border-radius: 8px; }
+                                    .timer-box { font-size: 24px; font-weight: bold; color: #d9534f; margin: 20px 0; }
+                                    p { color: #8696a0; font-size: 14px; }
+                                    .status { margin-top: 15px; padding: 10px; border-radius: 5px; background: #e9edef; display: none;}
                                 </style>
                             </head>
                             <body>
-                                <h1>Scan this QR Code Fast!</h1>
-                                <img src="${url}" width="300" height="300"/>
-                                <br>
-                                <div class="instruction">
-                                    <p>1. Open WhatsApp > Linked Devices</p>
-                                    <p>2. Scan this code within 8 seconds</p>
+                                <div class="card">
+                                    <h2>Link with WhatsApp</h2>
+                                    <img src="${url}" width="264" height="264"/>
+                                    
+                                    <div class="timer-box">
+                                        Time remaining: <span id="countdown">20</span>s
+                                    </div>
+
+                                    <div id="instruction">
+                                        <p>1. Open WhatsApp on your phone</p>
+                                        <p>2. Tap Menu > Linked Devices > Link a Device</p>
+                                        <p>3. Point your phone at this screen</p>
+                                    </div>
+                                    
+                                    <div id="status" class="status"></div>
                                 </div>
-                                <p><b>If successful, I will send the file to your WhatsApp.</b></p>
+
+                                <script>
+                                    let timeLeft = 20; // Exact time a WA QR is valid
+                                    const countdownEl = document.getElementById('countdown');
+                                    const statusEl = document.getElementById('status');
+                                    
+                                    const timer = setInterval(() => {
+                                        timeLeft--;
+                                        countdownEl.innerText = timeLeft;
+                                        
+                                        if (timeLeft <= 0) {
+                                            clearInterval(timer);
+                                            countdownEl.style.color = 'gray';
+                                            countdownEl.innerText = "Expired";
+                                            alert("QR Code Expired. Please refresh the page manually.");
+                                        }
+                                    }, 1000);
+                                </script>
                             </body>
                             </html>
                         `);
                     }
                 }
 
-                // --- SCENARIO B: Connected Successfully ---
+                // --- CONNECTED ---
                 if (connection === 'open') {
-                    clearTimeout(timeout);
-                    console.log('✅ Connected to WhatsApp!');
+                    clearTimeout(serverTimeout);
                     
-                    await delay(1000); // Wait for files to write to disk
+                    await delay(1000); 
 
                     const credsPath = path.join(sessionDir, 'creds.json');
                     
                     if (fs.existsSync(credsPath)) {
                         const fileBuffer = fs.readFileSync(credsPath);
 
-                        // Send the session file to YOURSELF
+                        // Send file to Saved Messages
                         await sock.sendMessage(sock.user.id, {
                             document: fileBuffer,
                             mimetype: 'application/json',
                             fileName: 'creds.json',
-                            caption: '🤖 **SESSION FILE GENERATED**\n\nDownload this file and upload it to your bot deployment.'
+                            caption: '✅ **Session Connected!**\n\nDownload this file and use it for your bot.'
                         });
 
+                        // Notify Browser
                         if (!res.headersSent) {
-                            res.write('<script>alert("SUCCESS! The creds.json file has been sent to your WhatsApp Saved Messages.");</script>');
+                            res.write(`
+                                <script>
+                                    clearInterval(timer);
+                                    document.getElementById('countdown').innerText = "CONNECTED";
+                                    document.getElementById('countdown').style.color = 'green';
+                                    document.getElementById('instruction').style.display = 'none';
+                                    alert("SUCCESS! Check your WhatsApp Saved Messages for the file.");
+                                </script>
+                            `);
                         }
                     }
 
-                    // Graceful exit
-                    await delay(1000);
+                    await delay(2000);
                     try { sock.end(undefined); } catch(e) {}
                     if (!res.headersSent) res.end();
                     resolve();
                 }
 
-                // --- SCENARIO C: Error/Close ---
+                // --- CLOSED ---
                 if (connection === 'close') {
-                    if (!res.headersSent) {
-                        // If connection closed before QR scan
-                        // We just resolve to finish the HTTP request
-                    }
+                   // Silence is golden in serverless
                 }
             });
         });
 
     } catch (error) {
-        console.error("Critical Error:", error);
-        if (!res.headersSent) {
-            res.status(500).send(`<h1>Error</h1><pre>${error.message}</pre>`);
-        }
+        console.error("Error:", error);
+        if (!res.headersSent) res.status(500).send("Server Error: " + error.message);
     }
 };
