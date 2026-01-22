@@ -1,0 +1,10 @@
+{
+  "name": "vercel-baileys-gen",
+  "version": "1.0.0",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "pino": "^8.1.0",
+    "qrcode": "^1.5.3",
+    "fs-extra": "^11.1.1"
+  }
+}
