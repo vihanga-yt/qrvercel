@@ -3,5 +3,8 @@
     "api/scan.js": {
       "maxDuration": 10
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/api/scan" }
+  ]
 }
