@@ -2,124 +2,135 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     delay, 
-    DisconnectReason 
+    DisconnectReason,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
-const fs = require('fs-extra');
+const fs = require('fs');
 const path = require('path');
 
 module.exports = async (req, res) => {
-    // 1. Setup paths
-    // We use /tmp because it is the only writable folder on Vercel
-    const sessionDir = path.join('/tmp', 'auth_temp_session');
-    
-    // Clean up previous session to ensure a fresh QR code
-    if (fs.existsSync(sessionDir)) {
-        fs.removeSync(sessionDir);
-    }
-
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    console.log("Function started...");
 
     try {
+        // 1. Setup paths safely
+        // Vercel only allows writing to /tmp
+        const sessionDir = path.join('/tmp', 'auth_temp_session');
+        
+        // Clean up previous session safely using standard FS
+        if (fs.existsSync(sessionDir)) {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+        }
+        fs.mkdirSync(sessionDir, { recursive: true });
+
+        // 2. Initialize Auth
+        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+        const { version } = await fetchLatestBaileysVersion();
+
         const sock = makeWASocket({
+            version,
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
-            browser: ['Vercel QR Gen', 'Chrome', '1.0.0']
+            browser: ['Vercel QR', 'Chrome', '1.0.0'],
+            connectTimeoutMs: 10000,
         });
 
-        // Use a promise to keep the function alive
+        // 3. The Promise Wrapper
         await new Promise((resolve, reject) => {
             
-            // Timeout safety (Vercel Free Tier limits to 10s-60s)
+            // Timeout to prevent hanging (kill after 20s)
             const timeout = setTimeout(() => {
+                if (!res.headersSent) {
+                    res.status(504).send("<h1>Timeout</h1><p>QR code expired or took too long.</p>");
+                }
                 sock.end(undefined);
-                res.status(504).send("<h1>Timeout</h1><p>You didn't scan in time. Refresh to try again.</p>");
                 resolve();
-            }, 40000); // 40 seconds max
+            }, 20000);
 
             sock.ev.on('creds.update', saveCreds);
 
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
 
-                // 2. Display QR Code in Browser
+                // A. QR Code Received -> Send HTML
                 if (qr) {
-                    // Convert QR string to Image Data URL
+                    console.log("QR Generated");
                     const url = await QRCode.toDataURL(qr);
                     
-                    // We send HTML immediately but keep the connection logic running
-                    // Note: In strict Serverless, sending response might kill process. 
-                    // But Vercel usually waits for the Event Loop to clear.
                     if (!res.headersSent) {
+                        res.setHeader('Content-Type', 'text/html');
                         res.write(`
                             <html>
                             <head>
-                                <meta http-equiv="refresh" content="20"> <!-- Auto refresh if stuck -->
-                                <style>
-                                    body { font-family: sans-serif; text-align: center; padding: 50px; }
-                                    img { border: 5px solid #000; border-radius: 10px; }
-                                </style>
+                                <meta http-equiv="refresh" content="10">
+                                <style>body{text-align:center; font-family:sans-serif; padding:20px;}</style>
                             </head>
                             <body>
-                                <h2>Scan this QR Code</h2>
-                                <p>Open WhatsApp > Linked Devices > Link a Device</p>
-                                <img src="${url}" />
-                                <p><b>Wait...</b> after scanning, I will send the session file to your WhatsApp.</p>
+                                <h2>Scan Fast!</h2>
+                                <img src="${url}" width="250"/>
+                                <p>Waiting for connection...</p>
                             </body>
                             </html>
                         `);
                     }
                 }
 
-                // 3. Handle Successful Connection
+                // B. Connected -> Send File
                 if (connection === 'open') {
                     clearTimeout(timeout);
-                    console.log('✅ Connected! Sending session file...');
+                    console.log('✅ Connected!');
 
-                    await delay(1000); // Wait for files to settle
+                    await delay(1000); 
 
-                    // Read the creds.json file from /tmp
                     const credsPath = path.join(sessionDir, 'creds.json');
                     
                     if (fs.existsSync(credsPath)) {
                         const fileBuffer = fs.readFileSync(credsPath);
 
-                        // 4. Send the file to the user's own number (Saved Messages)
+                        // Send to "Saved Messages" (yourself)
                         await sock.sendMessage(sock.user.id, { 
                             document: fileBuffer, 
                             mimetype: 'application/json', 
                             fileName: 'creds.json',
-                            caption: 'Here is your session file! 🤖\n\n1. Download this.\n2. Rename/Place it in your auth folder.\n3. Deploy your bot.'
+                            caption: 'Here is your new session file!'
                         });
 
+                        // Tell the browser
                         if (!res.headersSent) {
-                            res.write('<script>alert("Success! Check your WhatsApp Saved Messages.");</script>');
+                            res.write('<script>alert("Success! Check your WhatsApp.");</script>');
                         }
+                    } else {
+                        console.error("creds.json missing!");
                     }
 
-                    // Close connection gracefully
                     await delay(2000);
                     await sock.end(undefined);
-                    
                     if (!res.headersSent) res.end();
                     resolve();
                 }
 
-                // Handle Close
+                // C. Errors / Disconnects
                 if (connection === 'close') {
-                    const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                    if (!shouldReconnect) {
-                         if (!res.headersSent) res.end("<h1>Logged Out / Error</h1>");
-                         resolve();
+                    const reason = (lastDisconnect?.error)?.output?.statusCode;
+                    if (reason !== DisconnectReason.loggedOut && reason !== undefined) {
+                        // Reconnection is hard in serverless, usually better to restart
+                        console.log("Connection closed, reason:", reason);
+                    } else {
+                        console.log("Logged out / Finished");
+                        if (!res.headersSent) res.end();
+                        resolve();
                     }
                 }
             });
         });
 
     } catch (err) {
-        console.error(err);
-        if (!res.headersSent) res.status(500).send(err.message);
+        console.error("CRASH:", err);
+        // This ensures you see the error in the browser instead of "500"
+        if (!res.headersSent) {
+            res.status(500).send(`<h1>Error</h1><pre>${err.message}</pre>`);
+        }
     }
 };
