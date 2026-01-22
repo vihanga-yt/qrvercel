@@ -1,12 +1,12 @@
 {
-  "name": "vercel-qr-gen",
+  "name": "vercel-baileys-scanner",
   "version": "1.0.0",
   "scripts": {
     "start": "node api/scan.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
-    "pino": "^8.1.0",
+    "@whiskeysockets/baileys": "latest",
+    "pino": "^9.0.0",
     "qrcode": "^1.5.3"
   }
 }
